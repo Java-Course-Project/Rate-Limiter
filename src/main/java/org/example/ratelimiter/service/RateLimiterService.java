@@ -34,6 +34,7 @@ public class RateLimiterService {
 			tokens = rateLimiterProperties.getBucketCapacity();
 		}
 
+		log.debug("Current tokens: {}. Tokens needed: {}", tokens, token);
 		if (tokens < token) {
 			return false;
 		}
