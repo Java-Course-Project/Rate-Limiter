@@ -4,8 +4,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ratelimiter.config.RateLimiterProperties;
 import org.example.ratelimiter.model.TokenBucket;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -16,32 +20,14 @@ public class RateLimiterService {
 	private static final String RATE_LIMITER_KEY = "rate-limiter";
 
 	public boolean tryAcquire(int token) {
-		TokenBucket tokenBucket = redisTemplate.opsForValue().get(RATE_LIMITER_KEY);
-		if (tokenBucket == null) {
-			tokenBucket =
-					TokenBucket.builder().lastRefillTimestamp(System.currentTimeMillis()).tokens(rateLimiterProperties.getBucketSize())
-							   .build();
-		}
+		List<String> keys = List.of(RATE_LIMITER_KEY);
+		List<Object> args = List.of(System.currentTimeMillis(),
+									rateLimiterProperties.getRefillRate().toMillis(), token,
+									rateLimiterProperties.getBucketCapacity(), rateLimiterProperties.getBucketSize());
 
-		long now = System.currentTimeMillis();
-		long tokensToFill = (now - tokenBucket.getLastRefillTimestamp()) / rateLimiterProperties.getRefillRate().toMillis();
-		if (tokensToFill > 0) {
-			tokenBucket.setLastRefillTimestamp(
-					tokenBucket.getLastRefillTimestamp() + rateLimiterProperties.getRefillRate().toMillis() * tokensToFill);
-			tokenBucket.setTokens(tokenBucket.getTokens() + tokensToFill);
-		}
 
-		if (tokenBucket.getTokens() >= rateLimiterProperties.getBucketCapacity()) {
-			tokenBucket.setTokens(rateLimiterProperties.getBucketCapacity());
-		}
-
-		log.debug("Current tokens: {}. Tokens needed: {}", tokenBucket.getTokens(), token);
-		if (tokenBucket.getTokens() < token) {
-			redisTemplate.opsForValue().set(RATE_LIMITER_KEY, tokenBucket);
-			return false;
-		}
-		tokenBucket.setTokens(tokenBucket.getTokens() - token);
-		redisTemplate.opsForValue().set(RATE_LIMITER_KEY, tokenBucket);
-		return true;
+		return Boolean.TRUE.equals(
+				redisTemplate.execute(RedisScript.of(new ClassPathResource("lua/check_and_set_rate_limiter.lua"), Boolean.class), keys,
+									  args.toArray(new Object[0])));
 	}
 }
