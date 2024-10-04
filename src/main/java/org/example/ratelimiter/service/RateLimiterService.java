@@ -1,9 +1,10 @@
 package org.example.ratelimiter.service;
 
-import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ratelimiter.config.RateLimiterProperties;
+import org.example.ratelimiter.model.TokenBucket;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -11,34 +12,36 @@ import org.springframework.stereotype.Service;
 @Slf4j
 public class RateLimiterService {
 	private final RateLimiterProperties rateLimiterProperties;
+	private final RedisTemplate<String, TokenBucket> redisTemplate;
+	private static final String RATE_LIMITER_KEY = "rate-limiter";
 
-	// TODO: should be on Redis
-	private long tokens;
-	private volatile long lastRefillTimestamp;
+	public boolean tryAcquire(int token) {
+		TokenBucket tokenBucket = redisTemplate.opsForValue().get(RATE_LIMITER_KEY);
+		if (tokenBucket == null) {
+			tokenBucket =
+					TokenBucket.builder().lastRefillTimestamp(System.currentTimeMillis()).tokens(rateLimiterProperties.getBucketSize())
+							   .build();
+		}
 
-	@PostConstruct
-	public void init() {
-		tokens = rateLimiterProperties.getBucketSize();
-		lastRefillTimestamp = System.currentTimeMillis();
-	}
-
-	public synchronized boolean tryAcquire(int token) {
 		long now = System.currentTimeMillis();
-		long tokensToFill = (now - lastRefillTimestamp) / rateLimiterProperties.getRefillRate().toMillis();
+		long tokensToFill = (now - tokenBucket.getLastRefillTimestamp()) / rateLimiterProperties.getRefillRate().toMillis();
 		if (tokensToFill > 0) {
-			lastRefillTimestamp += rateLimiterProperties.getRefillRate().toMillis() * tokensToFill;
-			tokens += tokensToFill;
+			tokenBucket.setLastRefillTimestamp(
+					tokenBucket.getLastRefillTimestamp() + rateLimiterProperties.getRefillRate().toMillis() * tokensToFill);
+			tokenBucket.setTokens(tokenBucket.getTokens() + tokensToFill);
 		}
 
-		if (tokens >= rateLimiterProperties.getBucketCapacity()) {
-			tokens = rateLimiterProperties.getBucketCapacity();
+		if (tokenBucket.getTokens() >= rateLimiterProperties.getBucketCapacity()) {
+			tokenBucket.setTokens(rateLimiterProperties.getBucketCapacity());
 		}
 
-		log.debug("Current tokens: {}. Tokens needed: {}", tokens, token);
-		if (tokens < token) {
+		log.debug("Current tokens: {}. Tokens needed: {}", tokenBucket.getTokens(), token);
+		if (tokenBucket.getTokens() < token) {
+			redisTemplate.opsForValue().set(RATE_LIMITER_KEY, tokenBucket);
 			return false;
 		}
-		tokens -= token;
+		tokenBucket.setTokens(tokenBucket.getTokens() - token);
+		redisTemplate.opsForValue().set(RATE_LIMITER_KEY, tokenBucket);
 		return true;
 	}
 }
